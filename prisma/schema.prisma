@@ -1,0 +1,657 @@
+// Prisma schema for ZenithHR HRMS
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  role         String    @default("EMPLOYEE") // SUPER_ADMIN, ADMIN, MANAGER, EMPLOYEE
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  employee     Employee?
+  notifications Notification[]
+  auditLogs    AuditLog[]
+}
+
+model Company {
+  id                        String       @id @default(cuid())
+  name                      String
+  code                      String       @unique
+  logo                      String?
+  website                   String?
+  email                     String?
+  phone                     String?
+  address                   String?
+  address1                  String?
+  address2                  String?
+  address3                  String?
+  city                      String?
+  state                     String?
+  pinCode                   String?
+  country                   String?      @default("India")
+  currency                  String       @default("INR")
+  timezone                  String       @default("Asia/Kolkata")
+  dateFormat                String       @default("DD/MM/YYYY")
+
+  // Statutory Details
+  panNumber                 String?
+  tanNumber                 String?
+  tanRegistrationNumber     String?
+  taxNatureOfPayment        String?
+  deductorType              String?
+  factoryRegistrationNumber String?
+
+  branches                  Branch[]
+  departments               Department[]
+  shifts                    Shift[]
+  createdAt                 DateTime     @default(now())
+  updatedAt                 DateTime     @updatedAt
+}
+
+model Branch {
+  id           String     @id @default(cuid())
+  name         String
+  code         String
+  city         String
+  state        String
+  country      String     @default("India")
+  address      String?
+  latitude     Float?     @default(12.9716)
+  longitude    Float?     @default(77.5946)
+  radiusMeters Float?     @default(500)
+  companyId    String
+  company      Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employees    Employee[]
+  createdAt    DateTime   @default(now())
+}
+
+model Department {
+  id          String        @id @default(cuid())
+  name        String
+  code        String
+  description String?
+  companyId   String
+  company     Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  designations Designation[]
+  employees   Employee[]
+  jobOpenings JobOpening[]
+  createdAt   DateTime      @default(now())
+}
+
+model Designation {
+  id           String      @id @default(cuid())
+  name         String
+  code         String
+  departmentId String
+  department   Department  @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  employees    Employee[]
+  jobOpenings  JobOpening[]
+  createdAt    DateTime    @default(now())
+}
+
+model Shift {
+  id                String     @id @default(cuid())
+  name              String     // General, Morning, Evening, Night
+  startTime         String     // "09:00"
+  endTime           String     // "18:00"
+  gracePeriodMins   Int        @default(15)
+  breakDurationMins Int        @default(60)
+  weeklyOffDays     String     @default("Sunday") // comma separated
+  companyId         String
+  company           Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employees         Employee[]
+  createdAt         DateTime   @default(now())
+}
+
+model Employee {
+  id                    String      @id @default(cuid())
+  employeeCode          String      @unique
+  firstName             String
+  lastName              String
+  profilePhoto          String?
+  gender                String      // Male, Female, Other
+  dateOfBirth           DateTime?
+  email                 String      @unique
+  phone                 String?
+  alternatePhone        String?
+  address               String?
+  city                  String?
+  state                 String?
+  country               String?     @default("India")
+  postalCode            String?
+  joiningDate           DateTime    @default(now())
+  confirmationDate      DateTime?
+  status                String      @default("ACTIVE") // ACTIVE, PROBATION, NOTICE_PERIOD, TERMINATED, RESIGNED
+  
+  departmentId          String?
+  department            Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  designationId         String?
+  designation           Designation? @relation(fields: [designationId], references: [id], onDelete: SetNull)
+  branchId              String?
+  branch                Branch?     @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  shiftId               String?
+  shift                 Shift?      @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  
+  managerId             String?
+  manager               Employee?   @relation("ManagerToSubordinates", fields: [managerId], references: [id], onDelete: SetNull)
+  subordinates          Employee[]  @relation("ManagerToSubordinates")
+  
+  employmentType        String      @default("FULL_TIME") // FULL_TIME, PART_TIME, CONTRACT, INTERN
+  workLocation          String      @default("OFFICE") // OFFICE, REMOTE, HYBRID
+  
+  bankName              String?
+  accountNumber         String?
+  ifscCode              String?
+  panNumber             String?
+  uanNumber             String?
+  
+  emergencyContactName  String?
+  emergencyContactRelation String?
+  emergencyContactPhone String?
+  
+  userId                String?     @unique
+  user                  User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  attendances           Attendance[]
+  attendanceCorrections AttendanceCorrection[]
+  leaveBalances         LeaveBalance[]
+  leaveRequests         LeaveRequest[]
+  salaryStructure       SalaryStructure?
+  payslips              Payslip[]
+  expenseClaims         ExpenseClaim[]
+  documents             Document[]
+  goals                 Goal[]
+  performanceReviews    PerformanceReview[] @relation("EmployeeReviews")
+  managerReviews        PerformanceReview[] @relation("ReviewerReviews")
+  faceEnrollment        FaceEnrollment?
+  
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+}
+
+model Attendance {
+  id                String                 @id @default(cuid())
+  employeeId        String
+  employee          Employee               @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  date              DateTime               // start of day
+  checkIn           DateTime?
+  checkOut          DateTime?
+  checkInLocation   String?
+  checkOutLocation  String?
+  checkInLatitude   Float?
+  checkInLongitude  Float?
+  checkInAccuracy   Float?
+  checkOutLatitude  Float?
+  checkOutLongitude Float?
+  checkOutAccuracy  Float?
+  checkInMode       String?                @default("WEB") // WEB, MOBILE, FACE, GEOFENCE
+  checkOutMode      String?                @default("WEB")
+  faceVerified      Boolean                @default(false)
+  inGeofence        Boolean                @default(true)
+  workHours         Float                  @default(0)
+  breakHours        Float                  @default(1.0)
+  overtimeHours     Float                  @default(0)
+  status            String                 @default("PRESENT") // PRESENT, ABSENT, HALF_DAY, ON_LEAVE, HOLIDAY, WEEK_OFF
+  isLate            Boolean                @default(false)
+  isEarlyExit       Boolean                @default(false)
+  correction        AttendanceCorrection?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  @@unique([employeeId, date])
+}
+
+model AttendanceCorrection {
+  id               String      @id @default(cuid())
+  attendanceId     String?     @unique
+  attendance       Attendance? @relation(fields: [attendanceId], references: [id], onDelete: SetNull)
+  employeeId       String
+  employee         Employee    @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  date             DateTime
+  requestedCheckIn DateTime
+  requestedCheckOut DateTime
+  reason           String
+  status           String      @default("PENDING") // PENDING, APPROVED, REJECTED
+  reviewerRemarks  String?
+  reviewedBy       String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+}
+
+model LeaveType {
+  id            String         @id @default(cuid())
+  name          String         // Casual Leave, Sick Leave, Earned Leave, Paid Leave, Unpaid Leave, Optional Holiday
+  code          String         @unique // CL, SL, EL, PL, UL, OH
+  daysAllowed   Float          @default(12)
+  isPaid        Boolean        @default(true)
+  carryForward  Boolean        @default(false)
+  description   String?
+  color         String         @default("#3B82F6")
+  leaveBalances LeaveBalance[]
+  leaveRequests LeaveRequest[]
+}
+
+model LeaveBalance {
+  id            String    @id @default(cuid())
+  employeeId    String
+  employee      Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveTypeId   String
+  leaveType     LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Cascade)
+  year          Int
+  allocatedDays Float     @default(12)
+  usedDays      Float     @default(0)
+  pendingDays   Float     @default(0)
+
+  @@unique([employeeId, leaveTypeId, year])
+}
+
+model LeaveRequest {
+  id             String    @id @default(cuid())
+  employeeId     String
+  employee       Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveTypeId    String
+  leaveType      LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Cascade)
+  startDate      DateTime
+  endDate        DateTime
+  totalDays      Float
+  isHalfDay      Boolean   @default(false)
+  halfDayType    String?   // FIRST_HALF, SECOND_HALF
+  reason         String
+  documentUrl    String?
+  status         String    @default("PENDING") // PENDING, APPROVED, REJECTED, CANCELLED
+  managerRemarks String?
+  hrRemarks      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model Holiday {
+  id          String   @id @default(cuid())
+  name        String
+  date        DateTime
+  description String?
+  isOptional  Boolean  @default(false)
+  year        Int
+}
+
+model SalaryStructure {
+  id               String   @id @default(cuid())
+  employeeId       String   @unique
+  employee         Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  basicSalary      Float    @default(30000)
+  hra              Float    @default(15000)
+  specialAllowance Float    @default(10000)
+  conveyance       Float    @default(2000)
+  medicalAllowance Float    @default(1500)
+  otherAllowance   Float    @default(0)
+  bonus            Float    @default(0)
+  incentives       Float    @default(0)
+  epfEmployee      Float    @default(1800)
+  epfEmployer      Float    @default(1800)
+  esiEmployee      Float    @default(0)
+  esiEmployer      Float    @default(0)
+  professionalTax  Float    @default(200)
+  tds              Float    @default(1500)
+  loanDeduction    Float    @default(0)
+  grossSalary      Float    @default(58500)
+  netSalary        Float    @default(55000)
+  effectiveDate    DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model PayrollMonth {
+  id              String    @id @default(cuid())
+  month           Int       // 1-12
+  year            Int
+  status          String    @default("DRAFT") // DRAFT, PROCESSING, PROCESSED, APPROVED, PAID, LOCKED
+  isLocked        Boolean   @default(false)
+  lockedAt        DateTime?
+  lockedBy        String?
+  approvedAt      DateTime?
+  approvedBy      String?
+  processedAt     DateTime?
+  totalEmployees  Int       @default(0)
+  totalGross      Float     @default(0)
+  totalDeductions Float     @default(0)
+  totalNet        Float     @default(0)
+  payslips        Payslip[]
+  createdAt       DateTime  @default(now())
+
+  @@unique([month, year])
+}
+
+model Payslip {
+  id               String        @id @default(cuid())
+  payrollMonthId   String?
+  payrollMonth     PayrollMonth? @relation(fields: [payrollMonthId], references: [id], onDelete: SetNull)
+  employeeId       String
+  employee         Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  month            Int
+  year             Int
+  basicSalary      Float
+  hra              Float
+  specialAllowance Float
+  conveyance       Float
+  medicalAllowance Float
+  otherAllowance   Float         @default(0)
+  incentivesAmount Float         @default(0)
+  overtimeAmount   Float         @default(0)
+  bonusAmount      Float         @default(0)
+  grossEarnings    Float
+  epfDeduction     Float
+  esiDeduction     Float         @default(0)
+  professionalTax  Float
+  tdsDeduction     Float
+  loanDeduction    Float         @default(0)
+  leaveDeduction   Float         @default(0)
+  otherDeductions  Float         @default(0)
+  totalDeductions  Float
+  netSalary        Float
+  epfEmployer      Float         @default(1800)
+  esiEmployer      Float         @default(0)
+  workingDays      Int           @default(30)
+  presentDays      Float         @default(28)
+  paidLeaveDays    Float         @default(2)
+  lopDays          Float         @default(0)
+  paymentStatus    String        @default("PAID") // PENDING, PROCESSING, APPROVED, PAID
+  paymentDate      DateTime?
+  templateId       String?
+  generatedAt      DateTime      @default(now())
+
+  @@unique([employeeId, month, year])
+}
+
+model ExpenseClaim {
+  id           String    @id @default(cuid())
+  employeeId   String
+  employee     Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  title        String
+  category     String    // TRAVEL, MEALS, CLIENT_MEETING, ACCOMMODATION, SUPPLIES, OTHER
+  amount       Float
+  claimDate    DateTime  @default(now())
+  description  String
+  receiptUrl   String?
+  status       String    @default("PENDING") // PENDING, APPROVED, REJECTED, REIMBURSED
+  reviewerRemarks String?
+  reimbursedAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Document {
+  id                 String    @id @default(cuid())
+  employeeId         String?
+  employee           Employee? @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  category           String    // IDENTIFICATION, EDUCATION, CONTRACT, POLICY, CERTIFICATE, OTHER
+  title              String
+  fileName           String
+  fileUrl            String
+  fileSize           String?
+  mimeType           String?
+  isCompanyDoc       Boolean   @default(false)
+  expiryDate         DateTime?
+  verificationStatus String    @default("VERIFIED") // PENDING, VERIFIED, REJECTED
+  createdAt          DateTime  @default(now())
+}
+
+model PerformanceCycle {
+  id        String              @id @default(cuid())
+  title     String              // "Annual Appraisal 2024-2025"
+  startDate DateTime
+  endDate   DateTime
+  status    String              @default("ACTIVE") // UPCOMING, ACTIVE, REVIEW, COMPLETED
+  year      Int
+  goals     Goal[]
+  reviews   PerformanceReview[]
+}
+
+model Goal {
+  id          String           @id @default(cuid())
+  employeeId  String
+  employee    Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  cycleId     String
+  cycle       PerformanceCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  category    String           @default("INDIVIDUAL") // INDIVIDUAL, TEAM, ORGANIZATIONAL
+  weightage   Int              @default(25) // percentage
+  progress    Int              @default(0)  // 0-100%
+  status      String           @default("IN_PROGRESS") // NOT_STARTED, IN_PROGRESS, COMPLETED
+  dueDate     DateTime?
+  createdAt   DateTime         @default(now())
+}
+
+model PerformanceReview {
+  id             String           @id @default(cuid())
+  cycleId        String
+  cycle          PerformanceCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  employeeId     String
+  employee       Employee         @relation("EmployeeReviews", fields: [employeeId], references: [id], onDelete: Cascade)
+  reviewerId     String?
+  reviewer       Employee?        @relation("ReviewerReviews", fields: [reviewerId], references: [id], onDelete: SetNull)
+  selfRating     Float?           // 1 to 5
+  managerRating  Float?           // 1 to 5
+  finalRating    Float?           // 1 to 5
+  selfFeedback   String?
+  managerFeedback String?
+  status         String           @default("SUBMITTED") // DRAFT, SUBMITTED, REVIEWED, COMPLETED
+  completedAt    DateTime?
+  createdAt      DateTime         @default(now())
+}
+
+model JobOpening {
+  id              String       @id @default(cuid())
+  title           String
+  departmentId    String
+  department      Department   @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  designationId   String?
+  designation     Designation? @relation(fields: [designationId], references: [id], onDelete: SetNull)
+  openingsCount   Int          @default(1)
+  experienceYears String       @default("2-4 years")
+  location        String       @default("Headquarters")
+  employmentType  String       @default("FULL_TIME")
+  description     String
+  requirements    String?
+  status          String       @default("OPEN") // OPEN, ON_HOLD, CLOSED
+  candidates      Candidate[]
+  postedDate      DateTime     @default(now())
+}
+
+model Candidate {
+  id                String       @id @default(cuid())
+  jobOpeningId      String
+  jobOpening        JobOpening   @relation(fields: [jobOpeningId], references: [id], onDelete: Cascade)
+  fullName          String
+  email             String
+  phone             String
+  resumeUrl         String?
+  currentCompany    String?
+  currentCtc        Float?
+  expectedCtc       Float?
+  noticePeriodDays  Int?         @default(30)
+  status            String       @default("APPLIED") // APPLIED, SCREENING, INTERVIEW, SELECTED, OFFERED, JOINED, REJECTED
+  stageNotes        String?
+  rating            Int?         @default(4)
+  interviews        Interview[]
+  appliedDate       DateTime     @default(now())
+}
+
+model Interview {
+  id              String    @id @default(cuid())
+  candidateId     String
+  candidate       Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  roundName       String    // "Technical Round 1", "HR Round"
+  scheduledAt     DateTime
+  durationMinutes Int       @default(45)
+  interviewerName String
+  meetingLink     String?
+  status          String    @default("SCHEDULED") // SCHEDULED, COMPLETED, CANCELLED
+  feedback        String?
+  rating          Int?
+  createdAt       DateTime  @default(now())
+}
+
+model Announcement {
+  id                 String    @id @default(cuid())
+  title              String
+  content            String
+  priority           String    @default("GENERAL") // GENERAL, IMPORTANT, URGENT, EVENT
+  category           String    @default("COMPANY") // COMPANY, HR_POLICY, HOLIDAY, WELCOME
+  targetAudience     String    @default("ALL")     // ALL, DEPARTMENT, BRANCH
+  targetDepartmentId String?
+  publishedByName    String    @default("HR Department")
+  publishedAt        DateTime  @default(now())
+  expiresAt          DateTime?
+  isActive           Boolean   @default(true)
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  type      String   @default("GENERAL") // LEAVE, ATTENDANCE, PAYROLL, EXPENSE, ANNOUNCEMENT, GENERAL
+  isRead    Boolean  @default(false)
+  linkUrl   String?
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userName  String?
+  action    String   // LOGIN, LOGOUT, CREATE_EMPLOYEE, APPROVE_LEAVE, PROCESS_PAYROLL, etc.
+  entity    String   // Employee, LeaveRequest, Attendance, Payslip, etc.
+  entityId  String?
+  details   String?
+  ipAddress String?
+  createdAt DateTime @default(now())
+}
+
+model ProductUpdate {
+  id               String                 @id @default(cuid())
+  title            String
+  category         String                 // Employee Self Service, Attendance, Leave Management, Payroll, Recruitment, Performance, Analytics, Mobile App, Security, General
+  updateType       String                 // New, Update, Improvement, Fix, Announcement
+  shortDescription String
+  fullDescription  String
+  image            String?
+  publishDate      DateTime               @default(now())
+  status           String                 @default("PUBLISHED") // Draft, Scheduled, Published, Archived
+  viewsCount       Int                    @default(0)
+  reactions        ProductUpdateReaction[]
+  comments         ProductUpdateComment[]
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+}
+
+model ProductUpdateReaction {
+  id        String        @id @default(cuid())
+  updateId  String
+  update    ProductUpdate @relation(fields: [updateId], references: [id], onDelete: Cascade)
+  userId    String
+  type      String        // LIKE, DISLIKE
+  createdAt DateTime      @default(now())
+
+  @@unique([updateId, userId])
+}
+
+model ProductUpdateComment {
+  id        String        @id @default(cuid())
+  updateId  String
+  update    ProductUpdate @relation(fields: [updateId], references: [id], onDelete: Cascade)
+  userId    String
+  userName  String
+  userRole  String?
+  comment   String
+  createdAt DateTime      @default(now())
+}
+
+model SystemSetting {
+  id        String   @id @default(cuid())
+  category  String   // ATTENDANCE, LEAVE, PAYROLL, NOTIFICATIONS, SECURITY, OTHER
+  key       String   @unique
+  value     String   // JSON stringified configuration
+  updatedAt DateTime @updatedAt
+}
+
+model RolePermission {
+  id         String   @id @default(cuid())
+  role       String   // ADMIN, HR, MANAGER, EMPLOYEE
+  module     String   // Employees, Attendance, Leave, Payroll, Expenses, Documents, Performance, Recruitment, Reports, Product Updates, Settings
+  canView    Boolean  @default(true)
+  canCreate  Boolean  @default(false)
+  canEdit    Boolean  @default(false)
+  canDelete  Boolean  @default(false)
+  canApprove Boolean  @default(false)
+  canExport  Boolean  @default(false)
+  updatedAt  DateTime @updatedAt
+
+  @@unique([role, module])
+}
+
+model OfficeLocation {
+  id           String    @id @default(cuid())
+  name         String
+  code         String    @unique
+  address      String?
+  latitude     Float
+  longitude    Float
+  radiusMeters Float     @default(500)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model FaceEnrollment {
+  id               String    @id @default(cuid())
+  employeeId       String    @unique
+  employee         Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  faceDescriptor   String    // JSON array of facial landmark/embedding vector points
+  photoUrl         String?   // Reference face photo
+  consentGiven     Boolean   @default(true)
+  consentTimestamp DateTime  @default(now())
+  isActive         Boolean   @default(true)
+  enrolledAt       DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+model SalarySlipTemplate {
+  id                        String    @id @default(cuid())
+  name                      String
+  isDefault                 Boolean   @default(false)
+  companyName               String?
+  companyLogo               String?
+  companyAddress            String?
+  companyContact            String?
+  showLogo                  Boolean   @default(true)
+  showBankDetails           Boolean   @default(true)
+  showPanUan                Boolean   @default(true)
+  showDepartment            Boolean   @default(true)
+  showDesignation           Boolean   @default(true)
+  showLeavesSummary         Boolean   @default(true)
+  showOvertime              Boolean   @default(true)
+  showEmployerContributions Boolean   @default(true)
+  footerText                String?
+  termsAndConditions        String?
+  authorizedSignatory       String?
+  signatoryTitle            String?
+  signatureUrl              String?
+  themeColor                String    @default("#4F46E5")
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+}
+
+
