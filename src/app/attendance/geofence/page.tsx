@@ -21,6 +21,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import Link from "next/link";
+import { acquireBrowserCoordinates } from "@/lib/geo-client";
 
 export default function GeofenceAttendancePage() {
   const { user } = useAuth();
@@ -93,47 +94,26 @@ export default function GeofenceAttendancePage() {
   }, []);
 
   // Acquire GPS Location
-  const acquireLocation = () => {
+  const acquireLocation = async () => {
     setGpsError("");
     setPunchResult(null);
-
-    if (!navigator.geolocation) {
-      const err = "Geolocation is not supported by your current browser.";
-      setGpsError(err);
-      toast.error("GPS Unavailable", err);
-      return;
-    }
-
     setLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setCurrentCoords({
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy: Math.round(pos.coords.accuracy),
-          timestamp: new Date(pos.timestamp),
-        });
-        setLocating(false);
-      },
-      (err) => {
-        setLocating(false);
-        let msg = "Could not obtain GPS coordinates.";
-        if (err.code === err.PERMISSION_DENIED) {
-          msg = "GPS permission was denied. Please allow location permissions in your browser to verify geofence attendance.";
-        } else if (err.code === err.POSITION_UNAVAILABLE) {
-          msg = "GPS satellite position unavailable. Please ensure location services are enabled.";
-        } else if (err.code === err.TIMEOUT) {
-          msg = "GPS location request timed out. Please retry in an open area.";
-        }
-        setGpsError(msg);
-        toast.error("Location Error", msg);
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0,
-      }
-    );
+
+    try {
+      const pos = await acquireBrowserCoordinates({ timeout: 8000, fallbackToStandard: true });
+      setCurrentCoords({
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        accuracy: Math.round(pos.accuracy),
+        timestamp: new Date(pos.timestamp),
+      });
+    } catch (err: any) {
+      const msg = err.message || "Could not obtain GPS coordinates.";
+      setGpsError(msg);
+      toast.error("Location Error", msg);
+    } finally {
+      setLocating(false);
+    }
   };
 
   // Evaluate Geofence against active locations

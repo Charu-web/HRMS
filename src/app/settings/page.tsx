@@ -1114,6 +1114,34 @@ function SettingsContent() {
                           </span>
                         </label>
                       </div>
+
+                      <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <label className="font-semibold text-slate-700 dark:text-slate-300">
+                            Biometric Face Match Threshold
+                          </label>
+                          <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-800">
+                            {attendanceSettings.faceMatchThreshold ?? 65}% match confidence
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="50"
+                          max="90"
+                          step="5"
+                          value={attendanceSettings.faceMatchThreshold ?? 65}
+                          onChange={(e) =>
+                            setAttendanceSettings({
+                              ...attendanceSettings,
+                              faceMatchThreshold: Number(e.target.value),
+                            })
+                          }
+                          className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                        />
+                        <p className="text-[11px] text-slate-400">
+                          Configures the biometric similarity threshold (Recommended: 60% – 70%). Lowering prevents false rejections under uneven lighting; raising increases strictness.
+                        </p>
+                      </div>
                     </div>
                   </div>
                 )}

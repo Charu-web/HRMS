@@ -1,66 +1,15 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { Camera, CheckCircle2, AlertTriangle, ShieldCheck, X, RefreshCw, UserCheck } from "lucide-react";
+import { Camera, CheckCircle2, AlertTriangle, ShieldCheck, X, RefreshCw, UserCheck, MapPin } from "lucide-react";
+import { validateFaceQuality, extractFaceDescriptor } from "@/lib/face-detection";
+import { acquireBrowserCoordinates } from "@/lib/geo-client";
 
 interface FaceAttendanceModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess: (data: any) => void;
   punchType: "in" | "out";
-}
-
-// Generate normalized 128-d descriptor vector from video frame canvas
-function extractFaceDescriptorFromCanvas(canvas: HTMLCanvasElement): number[] {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return new Array(128).fill(0.1);
-
-  // Sample a central face region (60% width & height in center)
-  const sw = Math.floor(canvas.width * 0.6);
-  const sh = Math.floor(canvas.height * 0.6);
-  const sx = Math.floor((canvas.width - sw) / 2);
-  const sy = Math.floor((canvas.height - sh) / 2);
-
-  const imgData = ctx.getImageData(sx, sy, sw, sh);
-  const data = imgData.data;
-
-  // Compute 16x8 luminance & gradient feature bins (128 dimensions)
-  const vector: number[] = new Array(128).fill(0);
-  const binW = sw / 16;
-  const binH = sh / 8;
-
-  for (let by = 0; by < 8; by++) {
-    for (let bx = 0; bx < 16; bx++) {
-      const idx = by * 16 + bx;
-      let sumLuminance = 0;
-      let count = 0;
-
-      const startX = Math.floor(bx * binW);
-      const endX = Math.floor((bx + 1) * binW);
-      const startY = Math.floor(by * binH);
-      const endY = Math.floor((by + 1) * binH);
-
-      for (let y = startY; y < endY; y += 2) {
-        for (let x = startX; x < endX; x += 2) {
-          const pixelIndex = (y * sw + x) * 4;
-          const r = data[pixelIndex];
-          const g = data[pixelIndex + 1];
-          const b = data[pixelIndex + 2];
-          // Standard perceived luminance formula
-          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-          sumLuminance += lum;
-          count++;
-        }
-      }
-
-      vector[idx] = count > 0 ? sumLuminance / (count * 255) : 0;
-    }
-  }
-
-  // L2-normalize the vector
-  let norm = Math.sqrt(vector.reduce((acc, val) => acc + val * val, 0));
-  if (norm === 0) norm = 1;
-  return vector.map((v) => Math.round((v / norm) * 10000) / 10000);
 }
 
 export function FaceAttendanceModal({
@@ -78,31 +27,34 @@ export function FaceAttendanceModal({
   const [consentChecked, setConsentChecked] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // GPS State
   const [geoCoords, setGeoCoords] = useState<{ latitude: number; longitude: number; accuracy: number } | null>(null);
+  const [gpsStatus, setGpsStatus] = useState<"IDLE" | "ACQUIRING" | "SUCCESS" | "ERROR">("IDLE");
+  const [gpsError, setGpsError] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Acquire GPS Location
+  const fetchGpsLocation = async () => {
+    setGpsStatus("ACQUIRING");
+    setGpsError(null);
+    try {
+      const coords = await acquireBrowserCoordinates({ timeout: 8000, fallbackToStandard: true });
+      setGeoCoords(coords);
+      setGpsStatus("SUCCESS");
+    } catch (err: any) {
+      setGpsStatus("ERROR");
+      setGpsError(err.message || "Could not resolve GPS location.");
+    }
+  };
 
   // Check enrollment status & request location
   useEffect(() => {
     if (!isOpen) return;
 
-    // Check GPS
-    if (typeof window !== "undefined" && "geolocation" in navigator) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          setGeoCoords({
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-            accuracy: pos.coords.accuracy,
-          });
-        },
-        (err) => {
-          console.warn("GPS lookup warning:", err.message);
-        },
-        { enableHighAccuracy: true, timeout: 8000 }
-      );
-    }
+    fetchGpsLocation();
 
     // Check enrollment
     const checkStatus = async () => {
@@ -141,6 +93,9 @@ export function FaceAttendanceModal({
     const startCamera = async () => {
       try {
         setCameraError(null);
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error("Camera API is not supported in this browser environment.");
+        }
         const mediaStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
           audio: false,
@@ -154,7 +109,7 @@ export function FaceAttendanceModal({
       } catch (err: any) {
         console.error("Camera access error:", err);
         setCameraError(
-          err.name === "NotAllowedError"
+          err.name === "NotAllowedError" || err.name === "PermissionDeniedError"
             ? "Camera permission was denied. Please allow camera access in your browser."
             : "Could not initialize video camera. Please ensure a camera is connected."
         );
@@ -181,7 +136,7 @@ export function FaceAttendanceModal({
 
     setProcessing(true);
     setErrorMessage(null);
-    setStatusMessage("Capturing and enrolling facial biometric reference...");
+    setStatusMessage("Validating face quality and lighting...");
 
     try {
       const video = videoRef.current;
@@ -192,15 +147,23 @@ export function FaceAttendanceModal({
       if (!ctx) throw new Error("Could not initialize canvas context.");
 
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // Validate face presence, lighting & pose
+      const quality = await validateFaceQuality(canvas);
+      if (!quality.valid) {
+        throw new Error(quality.error || "Face quality check failed.");
+      }
+
+      setStatusMessage("Extracting 128-dimensional facial biometric descriptor...");
       const photoBase64 = canvas.toDataURL("image/jpeg", 0.7);
-      const descriptor = extractFaceDescriptorFromCanvas(canvas);
+      const descriptor = extractFaceDescriptor(canvas, quality.box);
 
       const res = await fetch("/api/attendance/face/enroll", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           faceDescriptor: descriptor,
-          photoBase64,
+          photoUrl: photoBase64,
           consentGiven: true,
         }),
       });
@@ -225,7 +188,7 @@ export function FaceAttendanceModal({
 
     setProcessing(true);
     setErrorMessage(null);
-    setStatusMessage("Comparing facial landmarks against registered template...");
+    setStatusMessage("Scanning camera frame & validating face quality...");
 
     try {
       const video = videoRef.current;
@@ -236,7 +199,15 @@ export function FaceAttendanceModal({
       if (!ctx) throw new Error("Canvas context failed.");
 
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const descriptor = extractFaceDescriptorFromCanvas(canvas);
+
+      // 1. Validate face presence & lighting quality
+      const quality = await validateFaceQuality(canvas);
+      if (!quality.valid) {
+        throw new Error(quality.error || "Face detection failed. Ensure face is visible.");
+      }
+
+      setStatusMessage("Matching biometric facial features against registered template...");
+      const descriptor = extractFaceDescriptor(canvas, quality.box);
 
       const payload = {
         faceDescriptor: descriptor,
@@ -257,7 +228,7 @@ export function FaceAttendanceModal({
         throw new Error(data.error || "Face verification failed.");
       }
 
-      setStatusMessage(data.message || `Biometric verification successful (${data.confidence}% match).`);
+      setStatusMessage(data.message || `Biometric verification successful (${data.matchScore}% match).`);
       setTimeout(() => {
         onSuccess(data);
         onClose();
@@ -343,14 +314,28 @@ export function FaceAttendanceModal({
 
           {/* GPS Info pill */}
           <div className="flex items-center justify-between text-[11px] text-slate-500 px-1">
-            <span>
+            <span className="flex items-center gap-1">
+              <MapPin size={12} className="text-indigo-500" />
               GPS:{" "}
-              {geoCoords ? (
+              {gpsStatus === "SUCCESS" && geoCoords ? (
                 <span className="text-emerald-600 font-semibold font-mono">
                   {geoCoords.latitude.toFixed(4)}, {geoCoords.longitude.toFixed(4)} (±{Math.round(geoCoords.accuracy)}m)
                 </span>
+              ) : gpsStatus === "ACQUIRING" ? (
+                <span className="text-amber-500 font-medium animate-pulse">Acquiring coordinates...</span>
+              ) : gpsStatus === "ERROR" ? (
+                <span className="text-rose-500 flex items-center gap-1 font-medium">
+                  Unavailable
+                  <button
+                    type="button"
+                    onClick={fetchGpsLocation}
+                    className="text-indigo-600 underline font-semibold ml-1 cursor-pointer"
+                  >
+                    Retry
+                  </button>
+                </span>
               ) : (
-                <span className="text-amber-500 font-medium">Acquiring coordinates...</span>
+                <span className="text-slate-400">Idle</span>
               )}
             </span>
             <span>
@@ -404,7 +389,7 @@ export function FaceAttendanceModal({
                 type="button"
                 onClick={handleEnroll}
                 disabled={processing || Boolean(cameraError)}
-                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-600/30 flex items-center gap-2 disabled:opacity-50"
+                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-600/30 flex items-center gap-2 disabled:opacity-50 cursor-pointer"
               >
                 {processing ? <RefreshCw size={14} className="animate-spin" /> : <UserCheck size={14} />}
                 <span>{processing ? "Enrolling..." : "Enroll My Face"}</span>
@@ -414,7 +399,7 @@ export function FaceAttendanceModal({
                 type="button"
                 onClick={handleVerifyAndPunch}
                 disabled={processing || Boolean(cameraError) || loadingStatus}
-                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/30 flex items-center gap-2 disabled:opacity-50"
+                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/30 flex items-center gap-2 disabled:opacity-50 cursor-pointer"
               >
                 {processing ? <RefreshCw size={14} className="animate-spin" /> : <Camera size={14} />}
                 <span>

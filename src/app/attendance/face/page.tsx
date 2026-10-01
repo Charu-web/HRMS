@@ -18,8 +18,11 @@ import {
   Settings,
   Sparkles,
   Info,
+  MapPin,
 } from "lucide-react";
 import Link from "next/link";
+import { validateFaceQuality, extractFaceDescriptor } from "@/lib/face-detection";
+import { acquireBrowserCoordinates } from "@/lib/geo-client";
 
 export default function FaceAttendancePage() {
   const { user } = useAuth();
@@ -120,36 +123,8 @@ export default function FaceAttendancePage() {
     };
   }, [stream]);
 
-  // Extract 128-dimensional facial feature vector from canvas
-  const extractFaceDescriptor = (canvas: HTMLCanvasElement): number[] => {
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return new Array(128).fill(0);
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imgData.data;
-
-    const descriptor: number[] = new Array(128).fill(0);
-    const step = Math.floor(data.length / (128 * 4));
-
-    for (let i = 0; i < 128; i++) {
-      let sum = 0;
-      let count = 0;
-      for (let j = 0; j < step; j++) {
-        const idx = (i * step + j) * 4;
-        if (idx < data.length - 2) {
-          const r = data[idx];
-          const g = data[idx + 1];
-          const b = data[idx + 2];
-          sum += (r * 0.299 + g * 0.587 + b * 0.114) / 255;
-          count++;
-        }
-      }
-      descriptor[i] = count > 0 ? parseFloat((sum / count).toFixed(4)) : 0;
-    }
-    return descriptor;
-  };
-
-  // Capture frame
-  const captureFrame = (): { descriptor: number[]; photoUrl: string } | null => {
+  // Capture frame and validate face quality
+  const captureAndValidateFrame = async (): Promise<{ descriptor: number[]; photoUrl: string } | null> => {
     if (!videoRef.current || !canvasRef.current) return null;
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -160,7 +135,17 @@ export default function FaceAttendancePage() {
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    const descriptor = extractFaceDescriptor(canvas);
+    // 1. Validate Face Presence & Lighting Quality
+    const quality = await validateFaceQuality(canvas);
+    if (!quality.valid) {
+      const errMsg = quality.error || "Face quality check failed.";
+      setResultMessage({ text: errMsg, success: false });
+      toast.error("Face Quality Check", errMsg);
+      return null;
+    }
+
+    // 2. Extract Standardized 128-D Biometric Feature Vector
+    const descriptor = extractFaceDescriptor(canvas, quality.box);
     const photoUrl = canvas.toDataURL("image/jpeg", 0.7);
     return { descriptor, photoUrl };
   };
@@ -171,15 +156,17 @@ export default function FaceAttendancePage() {
       toast.warning("Consent Required", "Please acknowledge biometric processing consent to proceed.");
       return;
     }
-    const captured = captureFrame();
-    if (!captured) {
-      toast.error("Capture Failed", "Ensure webcam stream is active.");
-      return;
-    }
 
     setProcessing(true);
     setResultMessage(null);
+
     try {
+      const captured = await captureAndValidateFrame();
+      if (!captured) {
+        setProcessing(false);
+        return;
+      }
+
       const res = await fetch("/api/attendance/face/enroll", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -212,37 +199,31 @@ export default function FaceAttendancePage() {
 
   // Handle Verification Punch
   const handleVerifyPunch = async (type: "in" | "out") => {
-    const captured = captureFrame();
-    if (!captured) {
-      toast.error("Capture Failed", "Ensure webcam is running.");
-      return;
-    }
-
     setProcessing(true);
     setResultMessage(null);
 
-    // Acquire GPS coordinates
-    let lat: number | null = null;
-    let lng: number | null = null;
-    let acc: number | null = null;
-
-    if (navigator.geolocation) {
-      try {
-        const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
-          navigator.geolocation.getCurrentPosition(resolve, reject, {
-            enableHighAccuracy: true,
-            timeout: 5000,
-          });
-        });
-        lat = pos.coords.latitude;
-        lng = pos.coords.longitude;
-        acc = pos.coords.accuracy;
-      } catch (e) {
-        // Continue if GPS not mandatory
-      }
-    }
-
     try {
+      const captured = await captureAndValidateFrame();
+      if (!captured) {
+        setProcessing(false);
+        return;
+      }
+
+      // Acquire GPS coordinates with resilient fallback
+      let lat: number | null = null;
+      let lng: number | null = null;
+      let acc: number | null = null;
+
+      try {
+        const pos = await acquireBrowserCoordinates({ timeout: 7000, fallbackToStandard: true });
+        lat = pos.latitude;
+        lng = pos.longitude;
+        acc = pos.accuracy;
+      } catch (e: any) {
+        console.warn("GPS acquisition note:", e.message);
+        // Will continue if geofencing is not strictly mandatory on server
+      }
+
       const res = await fetch("/api/attendance/face/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -257,7 +238,7 @@ export default function FaceAttendancePage() {
 
       const data = await res.json();
       if (res.ok) {
-        const score = data.similarity ? Math.round(data.similarity * 100) : 95;
+        const score = data.matchScore ?? (data.similarity ? Math.round(data.similarity * 100) : 95);
         setLastMatchScore(score);
         setResultMessage({
           text: `${data.message || "Punched successfully!"} (Biometric Match: ${score}%)`,

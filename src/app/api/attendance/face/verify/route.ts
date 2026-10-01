@@ -1,29 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { calculateCosineSimilarity, calculateEuclideanDistance } from "@/lib/face-detection";
 
-function calculateEuclideanDistance(vec1: number[], vec2: number[]): number {
-  if (vec1.length !== vec2.length || vec1.length === 0) return 999;
-  let sum = 0;
-  for (let i = 0; i < vec1.length; i++) {
-    const diff = vec1[i] - vec2[i];
-    sum += diff * diff;
-  }
-  return Math.sqrt(sum);
-}
-
-function calculateCosineSimilarity(vec1: number[], vec2: number[]): number {
-  if (vec1.length !== vec2.length || vec1.length === 0) return 0;
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < vec1.length; i++) {
-    dotProduct += vec1[i] * vec2[i];
-    normA += vec1[i] * vec1[i];
-    normB += vec2[i] * vec2[i];
-  }
-  if (normA === 0 || normB === 0) return 0;
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+function normalizeVector(vec: number[]): number[] {
+  if (!vec || vec.length === 0) return [];
+  const norm = Math.sqrt(vec.reduce((sum, val) => sum + val * val, 0));
+  if (norm === 0) return vec;
+  return vec.map((v) => v / norm);
 }
 
 export async function POST(req: NextRequest) {
@@ -34,7 +18,8 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { faceDescriptor, type = "in", latitude, longitude, accuracy } = body;
+    const { faceDescriptor, type, punchType, latitude, longitude, accuracy } = body;
+    const resolvedType = (type || punchType || "in").toLowerCase() === "out" ? "out" : "in";
 
     if (!faceDescriptor) {
       return NextResponse.json({ error: "Live facial signature capture is required for verification." }, { status: 400 });
@@ -51,21 +36,46 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    let enrolledVec: number[] = [];
-    let liveVec: number[] = [];
+    let rawEnrolledVec: number[] = [];
+    let rawLiveVec: number[] = [];
     try {
-      enrolledVec = typeof enrollment.faceDescriptor === "string" ? JSON.parse(enrollment.faceDescriptor) : enrollment.faceDescriptor;
-      liveVec = typeof faceDescriptor === "string" ? JSON.parse(faceDescriptor) : faceDescriptor;
+      rawEnrolledVec = typeof enrollment.faceDescriptor === "string" ? JSON.parse(enrollment.faceDescriptor) : enrollment.faceDescriptor;
+      rawLiveVec = typeof faceDescriptor === "string" ? JSON.parse(faceDescriptor) : faceDescriptor;
     } catch {
       return NextResponse.json({ error: "Malformed biometric descriptor vector." }, { status: 400 });
     }
 
-    // Perform vector distance and similarity checks
+    if (!Array.isArray(rawEnrolledVec) || !Array.isArray(rawLiveVec) || rawEnrolledVec.length === 0 || rawLiveVec.length === 0) {
+      return NextResponse.json({ error: "Invalid biometric descriptor length." }, { status: 400 });
+    }
+
+    // Ensure vectors are unit-normalized before comparison
+    const enrolledVec = normalizeVector(rawEnrolledVec);
+    const liveVec = normalizeVector(rawLiveVec);
+
+    // Compute vector distance and similarity checks
     const distance = calculateEuclideanDistance(liveVec, enrolledVec);
     const similarity = calculateCosineSimilarity(liveVec, enrolledVec);
 
-    // Standard face verification thresholds (Euclidean < 0.6 or Cosine similarity > 0.80)
-    const isMatch = distance < 0.65 || similarity > 0.78;
+    // Retrieve configurable threshold from system settings (default: 65% match confidence)
+    const attendanceRuleSetting = await prisma.systemSetting.findUnique({
+      where: { key: "attendance_rules" },
+    });
+    let rules: any = {};
+    if (attendanceRuleSetting?.value) {
+      try {
+        rules = JSON.parse(attendanceRuleSetting.value);
+      } catch (e) {}
+    }
+
+    const minMatchConfidence = rules.faceMatchThreshold ?? 65; // e.g. 65%
+    const similarityThreshold = minMatchConfidence / 100; // e.g. 0.65
+    // For unit vectors: distance = sqrt(2*(1 - similarity))
+    // similarity = 0.65 corresponds to distance ~0.836
+    const distanceThreshold = rules.faceDistanceThreshold ?? (Math.sqrt(2 * Math.max(0, 1 - similarityThreshold)) + 0.08);
+
+    const isMatch = similarity >= similarityThreshold || distance <= distanceThreshold;
+    const matchPercentage = Math.max(0, Math.min(100, Math.round(similarity * 100)));
 
     if (!isMatch) {
       await prisma.auditLog.create({
@@ -74,14 +84,16 @@ export async function POST(req: NextRequest) {
           userName: auth.name,
           action: "FACE_VERIFICATION_FAILED",
           entity: "Attendance",
-          details: `Biometric face mismatch (distance: ${distance.toFixed(3)}, similarity: ${(similarity * 100).toFixed(1)}%)`,
+          details: `Biometric face mismatch: match confidence ${matchPercentage}% (threshold: ${minMatchConfidence}%, distance: ${distance.toFixed(3)})`,
           ipAddress: req.headers.get("x-forwarded-for") || "127.0.0.1",
         },
       });
 
       return NextResponse.json({
-        error: `Face verification failed. Match score (${(similarity * 100).toFixed(1)}%) was below the required security confidence threshold.`,
+        error: `Face verification failed. Match score (${matchPercentage}%) was below the required security threshold (${minMatchConfidence}%). Please align your face inside the guide oval with adequate lighting.`,
         similarity,
+        matchScore: matchPercentage,
+        distance,
       }, { status: 400 });
     }
 
@@ -101,19 +113,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Employee profile not found." }, { status: 404 });
     }
 
-    // Check geofence rules
-    const attendanceRuleSetting = await prisma.systemSetting.findUnique({
-      where: { key: "attendance_rules" },
-    });
-    let rules: any = {};
-    if (attendanceRuleSetting?.value) {
-      try {
-        rules = JSON.parse(attendanceRuleSetting.value);
-      } catch (e) {}
-    }
-
+    // Server-side Geofence Enforcement
     let inGeofence = true;
-    if (latitude && longitude) {
+    if (latitude !== undefined && latitude !== null && longitude !== undefined && longitude !== null) {
       const { verifyGeofence } = await import("@/lib/geofence");
       const geofenceResult = await verifyGeofence(latitude, longitude, employee.branchId || null);
       inGeofence = geofenceResult.inGeofence;
@@ -128,7 +130,7 @@ export async function POST(req: NextRequest) {
       }
     } else if (rules.requireGeofencing) {
       return NextResponse.json(
-        { error: "Geofencing is mandatory. GPS location coordinates are required for attendance." },
+        { error: "Geofencing is mandatory. Valid GPS coordinates are required for biometric attendance." },
         { status: 400 }
       );
     }
@@ -140,19 +142,25 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    if (type === "in") {
+    if (resolvedType === "in") {
+      // PREVENT DUPLICATE CHECK-IN
       if (attendance && attendance.checkIn) {
-        return NextResponse.json({ error: "Already punched in for today.", attendance }, { status: 400 });
+        return NextResponse.json({
+          error: `Already punched in for today at ${new Date(attendance.checkIn).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Duplicate punch prevented.`,
+          attendance,
+        }, { status: 400 });
       }
 
-      const shiftStartTime = employee.shift?.startTime || "09:00";
-      const gracePeriod = employee.shift?.gracePeriodMins ?? 15;
+      const shiftStartTime = employee.shift?.startTime || rules.officeStart || "09:00";
+      const gracePeriod = employee.shift?.gracePeriodMins ?? rules.gracePeriodMinutes ?? 15;
       const [sHour, sMin] = shiftStartTime.split(":").map(Number);
       const shiftThreshold = new Date(today);
       shiftThreshold.setHours(sHour, sMin + gracePeriod, 0, 0);
       const isLate = now.getTime() > shiftThreshold.getTime();
 
-      const locationStr = latitude && longitude ? `Face Verified GPS: (${latitude.toFixed(4)}, ${longitude.toFixed(4)})` : "Face Recognition Terminal";
+      const locationStr = latitude && longitude
+        ? `Face Verified GPS: (${Number(latitude).toFixed(4)}, ${Number(longitude).toFixed(4)})`
+        : "Face Biometric Terminal";
 
       if (attendance) {
         attendance = await prisma.attendance.update({
@@ -196,21 +204,32 @@ export async function POST(req: NextRequest) {
           action: "FACE_CHECK_IN",
           entity: "Attendance",
           entityId: attendance.id,
-          details: `Face authenticated check-in (Confidence: ${(similarity * 100).toFixed(1)}%) at ${now.toLocaleTimeString()}`,
+          details: `Face authenticated check-in (Match Confidence: ${matchPercentage}%) at ${now.toLocaleTimeString()}`,
           ipAddress: req.headers.get("x-forwarded-for") || "127.0.0.1",
         },
       });
 
       return NextResponse.json({
         success: true,
-        message: `Face Verified! Punched in successfully at ${now.toLocaleTimeString()}`,
+        message: `Face Verified (${matchPercentage}% match)! Punched in successfully at ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
         similarity,
+        matchScore: matchPercentage,
         attendance,
       });
     } else {
       // CHECK OUT
       if (!attendance || !attendance.checkIn) {
-        return NextResponse.json({ error: "Cannot check out without an active check-in record." }, { status: 400 });
+        return NextResponse.json({
+          error: "Cannot punch out without an active check-in record for today.",
+        }, { status: 400 });
+      }
+
+      // PREVENT DUPLICATE CHECK-OUT
+      if (attendance.checkOut) {
+        return NextResponse.json({
+          error: `Already punched out for today at ${new Date(attendance.checkOut).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Duplicate punch prevented.`,
+          attendance,
+        }, { status: 400 });
       }
 
       const checkInTime = new Date(attendance.checkIn);
@@ -226,7 +245,9 @@ export async function POST(req: NextRequest) {
       const isEarlyExit = now.getTime() < shiftEndThreshold.getTime();
       const overtimeHours = workHours > 8 ? parseFloat((workHours - 8).toFixed(2)) : 0;
 
-      const locationStr = latitude && longitude ? `Face Verified GPS: (${latitude.toFixed(4)}, ${longitude.toFixed(4)})` : "Face Recognition Terminal";
+      const locationStr = latitude && longitude
+        ? `Face Verified GPS: (${Number(latitude).toFixed(4)}, ${Number(longitude).toFixed(4)})`
+        : "Face Biometric Terminal";
 
       attendance = await prisma.attendance.update({
         where: { id: attendance.id },
@@ -251,15 +272,16 @@ export async function POST(req: NextRequest) {
           action: "FACE_CHECK_OUT",
           entity: "Attendance",
           entityId: attendance.id,
-          details: `Face authenticated check-out (Confidence: ${(similarity * 100).toFixed(1)}%) at ${now.toLocaleTimeString()}`,
+          details: `Face authenticated check-out (Match Confidence: ${matchPercentage}%) at ${now.toLocaleTimeString()}`,
           ipAddress: req.headers.get("x-forwarded-for") || "127.0.0.1",
         },
       });
 
       return NextResponse.json({
         success: true,
-        message: `Face Verified! Punched out successfully at ${now.toLocaleTimeString()}`,
+        message: `Face Verified (${matchPercentage}% match)! Punched out successfully at ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
         similarity,
+        matchScore: matchPercentage,
         attendance,
       });
     }
